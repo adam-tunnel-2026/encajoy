@@ -1,5 +1,4 @@
 name: Encajoy - APK y AAB firmado
-
 on:
   workflow_dispatch:
   push:
@@ -7,32 +6,25 @@ on:
     paths:
       - Encajoy-0.1.0-Proyecto.zip
       - .github/workflows/encajoy-android.yml
-
 permissions:
   contents: read
-
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - uses: android-actions/setup-android@v3
         with:
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
-
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
-
-      - name: Compilar Encajoy
+          gradle-version: '8.11.1'
+      - name: Compilar y probar
         id: build
         env:
           ENCAJOY_ADMOB_APP_ID: ${{ vars.ENCAJOY_ADMOB_APP_ID }}
@@ -40,12 +32,33 @@ jobs:
           set -euo pipefail
           unzip -q Encajoy-0.1.0-Proyecto.zip -d proyecto
           cd proyecto/encajoy
-          gradle :app:assembleRelease :app:bundleRelease --no-daemon
-          version=$(jq -er '.elements[0].versionName | select(test("^[0-9]+[.][0-9]+[.][0-9]+$"))' \
-            app/build/outputs/apk/release/output-metadata.json)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          python3 - <<'PYTHON'
+          import re
+          from pathlib import Path
 
-      - name: Firmar Encajoy
+          def update(file, changes):
+              path = Path(file)
+              content = path.read_text()
+              for pattern, replacement in changes:
+                  content, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
+                  if count != 1:
+                      raise SystemExit(f"No se puede actualizar {file}: {pattern}")
+              path.write_text(content)
+
+          update("build.gradle", [
+              (r"""(com\.android\.application['"]\s+version\s+['"])8\.7\.3(?=['"])""", r"\g<1>8.10.1"),
+          ])
+          update("app/build.gradle", [
+              (r"(\bcompileSdk\s+)35\b", r"\g<1>36"),
+              (r"(\btargetSdk\s+)35\b", r"\g<1>36"),
+              (r"(\bversionCode\s+)30\b", r"\g<1>31"),
+              (r"""(\bversionName\s+['"])0\.6\.5(?=['"])""", r"\g<1>0.6.6"),
+          ])
+          PYTHON
+          gradle :app:assembleRelease :app:bundleRelease --no-daemon
+          version=$(jq -er '.elements[0].versionName | select(test("^[0-9]+[.][0-9]+[.][0-9]+$"))' app/build/outputs/apk/release/output-metadata.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Firmar con la clave permanente de Encajoy
         env:
           KEYSTORE_B64: ${{ secrets.ENCAJOY_KEYSTORE_B64 }}
           STORE_PASSWORD: ${{ secrets.ENCAJOY_STORE_PASSWORD }}
@@ -55,36 +68,29 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "$KEYSTORE_B64" || -z "$STORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
-            echo "::error::Falta configurar uno o más de los cuatro secretos de firma de Encajoy."
+            echo "::error::Configura los cuatro secretos de la clave de firma de Encajoy."
             exit 1
           fi
-
           umask 077
           keydir=$(mktemp -d "$RUNNER_TEMP/encajoy.XXXXXX")
           trap 'rm -rf "$keydir"' EXIT
           printf '%s' "$KEYSTORE_B64" | base64 --decode > "$keydir/signing.keystore"
-
-          sdk_tools="$ANDROID_HOME/build-tools/35.0.0"
-          outputs=proyecto/encajoy/app/build/outputs
-
-          "$sdk_tools/zipalign" -P 16 -f 4 \
-            "$outputs/apk/release/app-release-unsigned.apk" "$keydir/aligned.apk"
+          sdk_tools="$ANDROID_HOME/build-tools/36.0.0"
+          source_apk=proyecto/encajoy/app/build/outputs/apk/release/app-release-unsigned.apk
+          "$sdk_tools/zipalign" -P 16 -f 4 "$source_apk" "$keydir/aligned.apk"
           "$sdk_tools/apksigner" sign --ks "$keydir/signing.keystore" --ks-key-alias "$KEY_ALIAS" \
             --ks-pass env:STORE_PASSWORD --key-pass env:KEY_PASSWORD \
             --out "Encajoy-$VERSION.apk" "$keydir/aligned.apk"
-          "$sdk_tools/apksigner" verify "Encajoy-$VERSION.apk"
-
-          jarsigner -keystore "$keydir/signing.keystore" \
-            -storepass:env STORE_PASSWORD -keypass:env KEY_PASSWORD \
-            -signedjar "Encajoy-$VERSION.aab" "$outputs/bundle/release/app-release.aab" "$KEY_ALIAS"
+          "$sdk_tools/apksigner" verify --print-certs "Encajoy-$VERSION.apk"
+          source_aab=proyecto/encajoy/app/build/outputs/bundle/release/app-release.aab
+          jarsigner -keystore "$keydir/signing.keystore" -storepass:env STORE_PASSWORD \
+            -keypass:env KEY_PASSWORD -signedjar "Encajoy-$VERSION.aab" "$source_aab" "$KEY_ALIAS"
           jarsigner -verify "Encajoy-$VERSION.aab"
-
       - uses: actions/upload-artifact@v4
         with:
           name: Encajoy-${{ steps.build.outputs.version }}-Google-Play
           path: Encajoy-${{ steps.build.outputs.version }}.aab
           if-no-files-found: error
-
       - uses: actions/upload-artifact@v4
         with:
           name: Encajoy-${{ steps.build.outputs.version }}-APK
