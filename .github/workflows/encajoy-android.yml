@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Encajoy-0.6.7-Codigo-Corregido.zip'
+      - 'Encajoy-0.6.8-Codigo-Podio.zip'
       - '.github/workflows/encajoy-android.yml'
 
 permissions:
@@ -36,12 +36,12 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Preparar Encajoy 0.6.7
+      - name: Preparar Encajoy 0.6.8
         id: prepare
         run: |
           set -euo pipefail
 
-          ZIP="Encajoy-0.6.7-Codigo-Corregido.zip"
+          ZIP="Encajoy-0.6.8-Codigo-Podio.zip"
 
           if [ ! -f "$ZIP" ]; then
             echo "::error::No existe $ZIP"
@@ -51,22 +51,32 @@ jobs:
           mkdir -p proyecto
           unzip -q "$ZIP" -d proyecto
 
-          if [ ! -f proyecto/encajoy/app/build.gradle ]; then
-            echo "::error::Proyecto Android incompleto"
-            exit 1
-          fi
-
-          cd proyecto/encajoy
-
           python3 - <<'PYTHON'
           import re
           from pathlib import Path
 
-          root = Path("build.gradle")
-          content = root.read_text()
+          candidates = list(Path("proyecto").rglob("app/build.gradle"))
+
+          candidates = [
+              p for p in candidates
+              if (p.parent.parent / "build.gradle").is_file()
+          ]
+
+          if len(candidates) != 1:
+              raise SystemExit(
+                  f"Se esperaba un proyecto Android, encontrados: {len(candidates)}"
+              )
+
+          app = candidates[0]
+          root = app.parent.parent
+
+          print("Proyecto encontrado:", root)
+
+          root_gradle = root / "build.gradle"
+          content = root_gradle.read_text()
 
           content, count = re.subn(
-              r"""(com\.android\.application['"]\s+version\s+['"])8\.7\.3(?=['"])""",
+              r"""(com\.android\.application['"]\s+version\s+['"])[^'"]+(?=['"])""",
               r"\g<1>8.10.1",
               content
           )
@@ -74,39 +84,44 @@ jobs:
           if count != 1:
               raise SystemExit("No se pudo configurar Android Gradle Plugin")
 
-          root.write_text(content)
+          root_gradle.write_text(content)
 
-          app = Path("app/build.gradle")
           content = app.read_text()
 
           changes = [
-              (r"(\bcompileSdk\s+)35\b", r"\g<1>36"),
-              (r"(\btargetSdk\s+)35\b", r"\g<1>36"),
+              (r"(\bcompileSdk\s+)\d+\b", r"\g<1>36"),
+              (r"(\btargetSdk\s+)\d+\b", r"\g<1>36"),
+              (r"(\bversionCode\s+)\d+\b", r"\g<1>33"),
+              (
+                  r"""(\bversionName\s+['"])[^'"]+(?=['"])""",
+                  r"\g<1>0.6.8"
+              ),
           ]
 
           for pattern, replacement in changes:
-              content, count = re.subn(pattern, replacement, content)
+              content, count = re.subn(
+                  pattern,
+                  replacement,
+                  content
+              )
 
               if count != 1:
                   raise SystemExit(
                       "No se pudo actualizar: " + pattern
                   )
 
-          if not re.search(r"\bversionCode\s+32\b", content):
-              raise SystemExit("versionCode incorrecto")
-
-          if not re.search(
-              r"""versionName\s+['"]0\.6\.7['"]""",
-              content
-          ):
-              raise SystemExit("versionName incorrecto")
-
           app.write_text(content)
 
-          print("Encajoy 0.6.7 preparado correctamente")
+          Path("encajoy-project-path.txt").write_text(
+              str(root.resolve())
+          )
+
+          print("Encajoy 0.6.8 preparado")
+          print("versionCode: 33")
+          print("versionName: 0.6.8")
           PYTHON
 
-          echo "version=0.6.7" >> "$GITHUB_OUTPUT"
+          echo "version=0.6.8" >> "$GITHUB_OUTPUT"
 
       - name: Compilar APK y AAB
         env:
@@ -114,7 +129,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cd proyecto/encajoy
+          cd "$(cat encajoy-project-path.txt)"
 
           gradle :app:assembleRelease :app:bundleRelease --no-daemon
 
@@ -146,11 +161,14 @@ jobs:
           keydir=$(mktemp -d "$RUNNER_TEMP/encajoy.XXXXXX")
           trap 'rm -rf "$keydir"' EXIT
 
-          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$keydir/signing.keystore"
+          printf '%s' "$KEYSTORE_B64" |
+            base64 --decode > "$keydir/signing.keystore"
 
           sdk_tools="$ANDROID_HOME/build-tools/36.0.0"
 
-          source_apk="proyecto/encajoy/app/build/outputs/apk/release/app-release-unsigned.apk"
+          project_dir="$(cat encajoy-project-path.txt)"
+
+          source_apk="$project_dir/app/build/outputs/apk/release/app-release-unsigned.apk"
 
           "$sdk_tools/zipalign" -P 16 -f 4 \
             "$source_apk" \
@@ -168,7 +186,7 @@ jobs:
             --print-certs \
             "Encajoy-$VERSION.apk"
 
-          source_aab="proyecto/encajoy/app/build/outputs/bundle/release/app-release.aab"
+          source_aab="$project_dir/app/build/outputs/bundle/release/app-release.aab"
 
           jarsigner \
             -keystore "$keydir/signing.keystore" \
@@ -185,15 +203,15 @@ jobs:
       - name: Publicar APK
         uses: actions/upload-artifact@v4
         with:
-          name: Encajoy-0.6.7-APK
-          path: Encajoy-0.6.7.apk
+          name: Encajoy-0.6.8-APK
+          path: Encajoy-0.6.8.apk
           if-no-files-found: error
           retention-days: 30
 
       - name: Publicar AAB para Google Play
         uses: actions/upload-artifact@v4
         with:
-          name: Encajoy-0.6.7-Google-Play
-          path: Encajoy-0.6.7.aab
+          name: Encajoy-0.6.8-Google-Play
+          path: Encajoy-0.6.8.aab
           if-no-files-found: error
           retention-days: 30
